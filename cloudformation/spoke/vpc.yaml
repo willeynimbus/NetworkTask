@@ -1,0 +1,215 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Unified Spoke VPC Infrastructure - Supports multiple spoke deployments with different parameters'
+
+Parameters:
+  EnvironmentName:
+    Description: Environment name prefix for resources (e.g., SpokeA, SpokeB, SpokeC)
+    Type: String
+  
+  VpcCIDR:
+    Description: CIDR block for Spoke VPC
+    Type: String
+    AllowedPattern: ^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\/([0-9]|[1-2][0-9]|3[0-2]))$
+  
+  PublicSubnetCIDR:
+    Description: CIDR block for public subnet
+    Type: String
+  
+  PrivateSubnetCIDR:
+    Description: CIDR block for private subnet
+    Type: String
+
+  TransitGatewayId:
+    Description: Transit Gateway ID from Hub Account (shared via RAM)
+    Type: String
+
+  HubVpcCIDR:
+    Description: CIDR block of Hub VPC
+    Type: String
+    Default: 10.0.0.0/16
+
+  OtherSpokeCIDRs:
+    Description: Comma-separated list of other Spoke VPC CIDRs (e.g., 10.1.0.0/16,10.2.0.0/16)
+    Type: CommaDelimitedList
+    Default: ""
+
+Conditions:
+  HasOtherSpokes: !Not [!Equals [!Join ['', !Ref OtherSpokeCIDRs], '']]
+
+Resources:
+  # ============================================================================
+  # VPC Resources
+  # ============================================================================
+  
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-VPC
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # Internet Gateway
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-IGW
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  # Public Subnet
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Ref PublicSubnetCIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-Public-Subnet
+        - Key: Type
+          Value: Public
+
+  # Private Subnet
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Ref PrivateSubnetCIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-Private-Subnet
+        - Key: Type
+          Value: Private
+
+  # Public Route Table
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-Public-Routes
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet
+
+  # Private Route Table
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-Private-Routes
+
+  PrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet
+
+  # ============================================================================
+  # Transit Gateway Resources
+  # ============================================================================
+  
+  TransitGatewayAttachment:
+    Type: AWS::EC2::TransitGatewayAttachment
+    Properties:
+      TransitGatewayId: !Ref TransitGatewayId
+      VpcId: !Ref VPC
+      SubnetIds:
+        - !Ref PrivateSubnet
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-VPC-TGW-Attachment
+
+  # Route to Hub VPC via Transit Gateway
+  RouteToHub:
+    Type: AWS::EC2::Route
+    DependsOn: TransitGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: !Ref HubVpcCIDR
+      TransitGatewayId: !Ref TransitGatewayId
+
+  # Routes to Other Spoke VPCs via Transit Gateway (conditional on HasOtherSpokes)
+  RouteToOtherSpokesPrivate:
+    Type: AWS::EC2::Route
+    Condition: HasOtherSpokes
+    DependsOn: TransitGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: !Select [0, !Ref OtherSpokeCIDRs]
+      TransitGatewayId: !Ref TransitGatewayId
+
+  # Also add route in public route table to allow public subnet instances to reach other spokes via TGW
+  RouteToOtherSpokesPublic:
+    Type: AWS::EC2::Route
+    Condition: HasOtherSpokes
+    DependsOn: TransitGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: !Select [0, !Ref OtherSpokeCIDRs]
+      TransitGatewayId: !Ref TransitGatewayId
+
+Outputs:
+  VPC:
+    Description: Spoke VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub ${EnvironmentName}-VPC-ID
+
+  VpcCIDR:
+    Description: Spoke VPC CIDR
+    Value: !Ref VpcCIDR
+    Export:
+      Name: !Sub ${EnvironmentName}-VPC-CIDR
+
+  PublicSubnet:
+    Description: Public Subnet
+    Value: !Ref PublicSubnet
+    Export:
+      Name: !Sub ${EnvironmentName}-PublicSubnet-ID
+
+  PrivateSubnet:
+    Description: Private Subnet
+    Value: !Ref PrivateSubnet
+    Export:
+      Name: !Sub ${EnvironmentName}-PrivateSubnet-ID
+
+  TransitGatewayAttachmentId:
+    Description: Transit Gateway Attachment ID
+    Value: !Ref TransitGatewayAttachment
+    Export:
+      Name: !Sub ${EnvironmentName}-TGW-Attachment-ID
+
+  PrivateRouteTable:
+    Description: Private Route Table ID
+    Value: !Ref PrivateRouteTable
+    Export:
+      Name: !Sub ${EnvironmentName}-PrivateRouteTable-ID

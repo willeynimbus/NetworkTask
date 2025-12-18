@@ -1,0 +1,30 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Create Transit Gateway VPC Attachment in spoke account (for cross-account attach)'
+
+Parameters:
+  TransitGatewayId:
+    Description: Transit Gateway Id in the hub account
+    Type: String
+
+  VpcId:
+    Description: VPC Id in the spoke account
+    Type: String
+
+  SubnetIds:
+    Description: Comma-delimited list of subnet ids in the spoke account to use for the attachment
+    Type: CommaDelimitedList
+
+Resources:
+  SpokeTgwAttachment:
+    Type: AWS::EC2::TransitGatewayAttachment
+    Properties:
+      TransitGatewayId: !Ref TransitGatewayId
+      VpcId: !Ref VpcId
+      SubnetIds: !Ref SubnetIds
+
+Outputs:
+  TransitGatewayAttachmentId:
+    Description: Transit Gateway Attachment Id created in spoke
+    Value: !Ref SpokeTgwAttachment
+    Export:
+      Name: !Sub "${AWS::StackName}-TgwAttachmentId"
