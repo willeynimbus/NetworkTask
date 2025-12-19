@@ -5,23 +5,28 @@ Parameters:
   EnvironmentName:
     Description: Environment name prefix for resources (e.g., SpokeA, SpokeB, SpokeC)
     Type: String
+    Default: Spoke
   
   VpcCIDR:
     Description: CIDR block for Spoke VPC
     Type: String
+    Default: 10.1.0.0/16
     AllowedPattern: ^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\/([0-9]|[1-2][0-9]|3[0-2]))$
   
   PublicSubnetCIDR:
     Description: CIDR block for public subnet
     Type: String
+    Default: 10.1.1.0/24
   
   PrivateSubnetCIDR:
     Description: CIDR block for private subnet
     Type: String
+    Default: 10.1.2.0/24
 
   TransitGatewayId:
     Description: Transit Gateway ID from Hub Account (shared via RAM)
     Type: String
+    Default: ''
 
   HubVpcCIDR:
     Description: CIDR block of Hub VPC
