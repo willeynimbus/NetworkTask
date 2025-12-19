@@ -205,56 +205,75 @@ jobs:
           echo "Spoke A: $SPOKE_A_ID (10.1.0.0/16)"
           echo "Spoke B: $SPOKE_B_ID (10.2.0.0/16)"
           
-          # Deploy to both accounts with deployment targets
-          # Note: We'll use two separate operations since parameters differ per account
+          # Function to deploy or update a spoke
+          deploy_spoke() {
+            local ACCOUNT_ID=$1
+            local SPOKE_NAME=$2
+            local VPC_CIDR=$3
+            local PUBLIC_CIDR=$4
+            local PRIVATE_CIDR=$5
+            local OTHER_CIDR=$6
+            
+            echo "Checking if stack instance exists for $SPOKE_NAME..."
+            
+            # Check if instance already exists
+            if aws cloudformation describe-stack-instance \
+              --stack-set-name ${{ env.STACKSET_NAME }} \
+              --stack-instance-account $ACCOUNT_ID \
+              --stack-instance-region ${{ env.AWS_REGION }} \
+              --query 'StackInstance.StackId' \
+              --output text 2>/dev/null; then
+              
+              echo "$SPOKE_NAME instance exists. Updating..."
+              OPERATION_ID=$(aws cloudformation update-stack-instances \
+                --stack-set-name ${{ env.STACKSET_NAME }} \
+                --accounts $ACCOUNT_ID \
+                --regions ${{ env.AWS_REGION }} \
+                --parameter-overrides \
+                  ParameterKey=EnvironmentName,ParameterValue=$SPOKE_NAME \
+                  ParameterKey=VpcCIDR,ParameterValue=$VPC_CIDR \
+                  ParameterKey=PublicSubnetCIDR,ParameterValue=$PUBLIC_CIDR \
+                  ParameterKey=PrivateSubnetCIDR,ParameterValue=$PRIVATE_CIDR \
+                  ParameterKey=TransitGatewayId,ParameterValue=$TRANSIT_GATEWAY_ID \
+                  ParameterKey=HubVpcCIDR,ParameterValue=10.0.0.0/16 \
+                  ParameterKey=OtherSpokeCIDRs,ParameterValue=$OTHER_CIDR \
+                --query 'OperationId' \
+                --output text)
+              echo "$SPOKE_NAME updated with operation: $OPERATION_ID"
+            else
+              echo "$SPOKE_NAME instance does not exist. Creating..."
+              OPERATION_ID=$(aws cloudformation create-stack-instances \
+                --stack-set-name ${{ env.STACKSET_NAME }} \
+                --accounts $ACCOUNT_ID \
+                --regions ${{ env.AWS_REGION }} \
+                --operation-preferences FailureToleranceCount=0,MaxConcurrentCount=2 \
+                --parameter-overrides \
+                  ParameterKey=EnvironmentName,ParameterValue=$SPOKE_NAME \
+                  ParameterKey=VpcCIDR,ParameterValue=$VPC_CIDR \
+                  ParameterKey=PublicSubnetCIDR,ParameterValue=$PUBLIC_CIDR \
+                  ParameterKey=PrivateSubnetCIDR,ParameterValue=$PRIVATE_CIDR \
+                  ParameterKey=TransitGatewayId,ParameterValue=$TRANSIT_GATEWAY_ID \
+                  ParameterKey=HubVpcCIDR,ParameterValue=10.0.0.0/16 \
+                  ParameterKey=OtherSpokeCIDRs,ParameterValue=$OTHER_CIDR \
+                --query 'OperationId' \
+                --output text)
+              echo "$SPOKE_NAME created with operation: $OPERATION_ID"
+            fi
+            
+            echo $OPERATION_ID
+          }
           
-          # Deploy to Spoke A
-          echo "Starting deployment to Spoke A..."
-          OPERATION_A=$(aws cloudformation create-stack-instances \
-            --stack-set-name ${{ env.STACKSET_NAME }} \
-            --accounts $SPOKE_A_ID \
-            --regions ${{ env.AWS_REGION }} \
-            --operation-preferences FailureToleranceCount=0,MaxConcurrentCount=2 \
-            --parameter-overrides \
-              ParameterKey=EnvironmentName,ParameterValue=SpokeA \
-              ParameterKey=VpcCIDR,ParameterValue=10.1.0.0/16 \
-              ParameterKey=PublicSubnetCIDR,ParameterValue=10.1.1.0/24 \
-              ParameterKey=PrivateSubnetCIDR,ParameterValue=10.1.2.0/24 \
-              ParameterKey=TransitGatewayId,ParameterValue=$TRANSIT_GATEWAY_ID \
-              ParameterKey=HubVpcCIDR,ParameterValue=10.0.0.0/16 \
-              ParameterKey=OtherSpokeCIDRs,ParameterValue=10.2.0.0/16 \
-            --query 'OperationId' \
-            --output text 2>&1) || {
-              echo "Spoke A might already exist, checking status..."
-              OPERATION_A="SKIPPED"
-            }
-          
+          # Deploy Spoke A
+          echo "=== Deploying Spoke A ==="
+          OPERATION_A=$(deploy_spoke "$SPOKE_A_ID" "SpokeA" "10.1.0.0/16" "10.1.1.0/24" "10.1.2.0/24" "10.2.0.0/16")
           echo "Spoke A Operation ID: $OPERATION_A"
           
-          # Wait a moment before starting second operation
+          # Wait before deploying Spoke B
           sleep 5
           
-          # Deploy to Spoke B
-          echo "Starting deployment to Spoke B..."
-          OPERATION_B=$(aws cloudformation create-stack-instances \
-            --stack-set-name ${{ env.STACKSET_NAME }} \
-            --accounts $SPOKE_B_ID \
-            --regions ${{ env.AWS_REGION }} \
-            --operation-preferences FailureToleranceCount=0,MaxConcurrentCount=2 \
-            --parameter-overrides \
-              ParameterKey=EnvironmentName,ParameterValue=SpokeB \
-              ParameterKey=VpcCIDR,ParameterValue=10.2.0.0/16 \
-              ParameterKey=PublicSubnetCIDR,ParameterValue=10.2.1.0/24 \
-              ParameterKey=PrivateSubnetCIDR,ParameterValue=10.2.2.0/24 \
-              ParameterKey=TransitGatewayId,ParameterValue=$TRANSIT_GATEWAY_ID \
-              ParameterKey=HubVpcCIDR,ParameterValue=10.0.0.0/16 \
-              ParameterKey=OtherSpokeCIDRs,ParameterValue=10.1.0.0/16 \
-            --query 'OperationId' \
-            --output text 2>&1) || {
-              echo "Spoke B might already exist, checking status..."
-              OPERATION_B="SKIPPED"
-            }
-          
+          # Deploy Spoke B
+          echo "=== Deploying Spoke B ==="
+          OPERATION_B=$(deploy_spoke "$SPOKE_B_ID" "SpokeB" "10.2.0.0/16" "10.2.1.0/24" "10.2.2.0/24" "10.1.0.0/16")
           echo "Spoke B Operation ID: $OPERATION_B"
           
           echo "operation_a=$OPERATION_A" >> $GITHUB_OUTPUT
