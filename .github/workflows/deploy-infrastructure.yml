@@ -163,10 +163,7 @@ jobs:
               --template-body file://cloudformation/spoke/vpc.yaml \
               --capabilities CAPABILITY_IAM \
               --region ${{ env.AWS_REGION }} \
-              --operation-preferences FailureToleranceCount=0,MaxConcurrentCount=2 \
-              --parameters \
-                ParameterKey=TransitGatewayId,ParameterValue=$TRANSIT_GATEWAY_ID \
-                ParameterKey=HubVpcCIDR,ParameterValue=10.0.0.0/16
+              --operation-preferences FailureToleranceCount=0,MaxConcurrentCount=2
             
             echo "✅ StackSet updated"
           else
@@ -175,10 +172,7 @@ jobs:
               --stack-set-name ${{ env.STACKSET_NAME }} \
               --template-body file://cloudformation/spoke/vpc.yaml \
               --capabilities CAPABILITY_IAM \
-              --region ${{ env.AWS_REGION }} \
-              --parameters \
-                ParameterKey=TransitGatewayId,ParameterValue=$TRANSIT_GATEWAY_ID \
-                ParameterKey=HubVpcCIDR,ParameterValue=10.0.0.0/16
+              --region ${{ env.AWS_REGION }}
             
             echo "✅ StackSet created"
           fi
@@ -187,6 +181,7 @@ jobs:
         run: |
           SPOKE_A_ID="${{ secrets.SPOKE_A_ACCOUNT_ID }}"
           SPOKE_B_ID="${{ secrets.SPOKE_B_ACCOUNT_ID }}"
+          TRANSIT_GATEWAY_ID="${{ needs.deploy-hub.outputs.transit-gateway-id }}"
           
           # Deploy to Spoke A
           echo "Deploying to Spoke A (Account: $SPOKE_A_ID)..."
@@ -200,6 +195,8 @@ jobs:
               ParameterKey=VpcCIDR,ParameterValue=10.1.0.0/16 \
               ParameterKey=PublicSubnetCIDR,ParameterValue=10.1.1.0/24 \
               ParameterKey=PrivateSubnetCIDR,ParameterValue=10.1.2.0/24 \
+              ParameterKey=TransitGatewayId,ParameterValue=$TRANSIT_GATEWAY_ID \
+              ParameterKey=HubVpcCIDR,ParameterValue=10.0.0.0/16 \
               ParameterKey=OtherSpokeCIDRs,ParameterValue=10.2.0.0/16 \
             || echo "Stack instance may already exist for Spoke A"
           
@@ -215,6 +212,8 @@ jobs:
               ParameterKey=VpcCIDR,ParameterValue=10.2.0.0/16 \
               ParameterKey=PublicSubnetCIDR,ParameterValue=10.2.1.0/24 \
               ParameterKey=PrivateSubnetCIDR,ParameterValue=10.2.2.0/24 \
+              ParameterKey=TransitGatewayId,ParameterValue=$TRANSIT_GATEWAY_ID \
+              ParameterKey=HubVpcCIDR,ParameterValue=10.0.0.0/16 \
               ParameterKey=OtherSpokeCIDRs,ParameterValue=10.1.0.0/16 \
             || echo "Stack instance may already exist for Spoke B"
       
