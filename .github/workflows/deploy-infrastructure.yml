@@ -1,4 +1,4 @@
-name: Deploy Infrastructure
+name: Deploy Multi-Account Infrastructure
 
 on:
   push:
@@ -8,13 +8,16 @@ on:
 
 env:
   AWS_REGION: us-east-1
-  HUB_ACCOUNT_ID: ${{ secrets.HUB_ACCOUNT_ID }}
   HUB_STACK_NAME: hub-infrastructure
+  STACKSET_NAME: spoke-vpc-stackset
 
 jobs:
   deploy-hub:
     name: Deploy Hub Infrastructure
     runs-on: ubuntu-latest
+    outputs:
+      transit-gateway-id: ${{ steps.hub-outputs.outputs.transit-gateway-id }}
+      tgw-route-table-id: ${{ steps.hub-outputs.outputs.tgw-route-table-id }}
     
     steps:
       - name: Checkout code
@@ -48,7 +51,7 @@ jobs:
           
           TGW_ROUTE_TABLE_ID=$(aws cloudformation describe-stacks \
             --stack-name ${{ env.HUB_STACK_NAME }} \
-            --query 'Stacks[0].Outputs[?OutputKey==`TGWRouteTableId`].OutputValue' \
+            --query 'Stacks[0].Outputs[?OutputKey==`TransitGatewayRouteTableId`].OutputValue' \
             --output text)
           
           echo "transit-gateway-id=$TRANSIT_GATEWAY_ID" >> $GITHUB_OUTPUT
@@ -60,41 +63,212 @@ jobs:
           echo "Transit Gateway ID: ${{ steps.hub-outputs.outputs.transit-gateway-id }}"
           echo "TGW Route Table ID: ${{ steps.hub-outputs.outputs.tgw-route-table-id }}"
 
-  # Spoke deployment jobs are commented out - only deploying hub infrastructure
-  # deploy-spokes:
-  #   name: Deploy Spoke Infrastructure
-  #   runs-on: ubuntu-latest
-  #   needs: deploy-hub
-  #   strategy:
-  #     matrix:
-  #       spoke:
-  #         - account_id: ${{ secrets.SPOKE1_ACCOUNT_ID }}
-  #           name: spoke1
-  #           vpc_cidr: 10.1.0.0/16
-  #         - account_id: ${{ secrets.SPOKE2_ACCOUNT_ID }}
-  #           name: spoke2
-  #           vpc_cidr: 10.2.0.0/16
-  #   
-  #   steps:
-  #     - name: Checkout code
-  #       uses: actions/checkout@v3
-  #     
-  #     - name: Configure AWS Credentials for Spoke Account
-  #       uses: aws-actions/configure-aws-credentials@v2
-  #       with:
-  #         aws-access-key-id: ${{ secrets[format('SPOKE{0}_AWS_ACCESS_KEY_ID', matrix.spoke.name)] }}
-  #         aws-secret-access-key: ${{ secrets[format('SPOKE{0}_AWS_SECRET_ACCESS_KEY', matrix.spoke.name)] }}
-  #         aws-region: ${{ env.AWS_REGION }}
+  verify-ram-share:
+    name: Verify RAM Share Acceptance
+    runs-on: ubuntu-latest
+    needs: deploy-hub
+    outputs:
+      ram-accepted: ${{ steps.check-acceptance.outputs.accepted }}
+    
+    steps:
+      - name: Configure AWS Credentials for Hub Account
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Check RAM Share Status
+        id: check-acceptance
+        run: |
+          echo "Checking RAM resource share status..."
+          
+          # Get all resource shares
+          RESOURCE_SHARES=$(aws ram get-resource-shares \
+            --resource-owner SELF \
+            --query 'resourceShares[?name==`Hub-TGW-Share`].resourceShareArn' \
+            --output text)
+          
+          if [ -z "$RESOURCE_SHARES" ]; then
+            echo "⚠️ No RAM resource share found. This might be expected if not using organization sharing."
+            echo "accepted=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          echo "Resource Share ARN: $RESOURCE_SHARES"
+          
+          # Check if invitations are accepted for both spoke accounts
+          SPOKE_A_ID="${{ secrets.SPOKE_A_ACCOUNT_ID }}"
+          SPOKE_B_ID="${{ secrets.SPOKE_B_ACCOUNT_ID }}"
+          
+          ALL_ACCEPTED=true
+          
+          for ACCOUNT_ID in $SPOKE_A_ID $SPOKE_B_ID; do
+            echo "Checking acceptance status for account: $ACCOUNT_ID"
+            
+            # Check if the principal (account) has accepted the share
+            STATUS=$(aws ram get-resource-share-associations \
+              --association-type PRINCIPAL \
+              --resource-share-arns $RESOURCE_SHARES \
+              --query "resourceShareAssociations[?associatedEntity=='$ACCOUNT_ID'].status" \
+              --output text)
+            
+            if [ "$STATUS" == "ASSOCIATED" ]; then
+              echo "✅ Account $ACCOUNT_ID has accepted the RAM share"
+            else
+              echo "⚠️ Account $ACCOUNT_ID status: $STATUS (Expected: ASSOCIATED)"
+              ALL_ACCEPTED=false
+            fi
+          done
+          
+          if [ "$ALL_ACCEPTED" == "true" ]; then
+            echo "✅ All spoke accounts have accepted the RAM share"
+            echo "accepted=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Not all spoke accounts have accepted the RAM share"
+            echo "Please accept the RAM share invitation in the spoke accounts"
+            echo "accepted=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
 
-  # accept-attachments:
-  #   name: Accept Transit Gateway Attachments
-  #   runs-on: ubuntu-latest
-  #   needs: deploy-spokes
-  #   
-  #   steps:
-  #     - name: Configure AWS Credentials for Hub Account
-  #       uses: aws-actions/configure-aws-credentials@v2
-  #       with:
-  #         aws-access-key-id: ${{ secrets.HUB_AWS_ACCESS_KEY_ID }}
-  #         aws-secret-access-key: ${{ secrets.HUB_AWS_SECRET_ACCESS_KEY }}
-  #         aws-region: ${{ env.AWS_REGION }}
+  deploy-spoke-stackset:
+    name: Deploy Spoke VPC StackSet
+    runs-on: ubuntu-latest
+    needs: [deploy-hub, verify-ram-share]
+    if: needs.verify-ram-share.outputs.ram-accepted == 'true'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Configure AWS Credentials for Hub Account
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Create or Update StackSet
+        run: |
+          TRANSIT_GATEWAY_ID="${{ needs.deploy-hub.outputs.transit-gateway-id }}"
+          
+          # Check if StackSet exists
+          if aws cloudformation describe-stack-set \
+            --stack-set-name ${{ env.STACKSET_NAME }} \
+            --region ${{ env.AWS_REGION }} 2>/dev/null; then
+            
+            echo "StackSet exists. Updating..."
+            aws cloudformation update-stack-set \
+              --stack-set-name ${{ env.STACKSET_NAME }} \
+              --template-body file://cloudformation/spoke/vpc.yaml \
+              --capabilities CAPABILITY_IAM \
+              --region ${{ env.AWS_REGION }} \
+              --operation-preferences FailureToleranceCount=0,MaxConcurrentCount=2 \
+              --parameters \
+                ParameterKey=TransitGatewayId,ParameterValue=$TRANSIT_GATEWAY_ID \
+                ParameterKey=HubVpcCIDR,ParameterValue=10.0.0.0/16
+            
+            echo "✅ StackSet updated"
+          else
+            echo "StackSet does not exist. Creating..."
+            aws cloudformation create-stack-set \
+              --stack-set-name ${{ env.STACKSET_NAME }} \
+              --template-body file://cloudformation/spoke/vpc.yaml \
+              --capabilities CAPABILITY_IAM \
+              --region ${{ env.AWS_REGION }} \
+              --parameters \
+                ParameterKey=TransitGatewayId,ParameterValue=$TRANSIT_GATEWAY_ID \
+                ParameterKey=HubVpcCIDR,ParameterValue=10.0.0.0/16
+            
+            echo "✅ StackSet created"
+          fi
+      
+      - name: Deploy StackSet Instances to Spoke Accounts
+        run: |
+          SPOKE_A_ID="${{ secrets.SPOKE_A_ACCOUNT_ID }}"
+          SPOKE_B_ID="${{ secrets.SPOKE_B_ACCOUNT_ID }}"
+          
+          # Deploy to Spoke A
+          echo "Deploying to Spoke A (Account: $SPOKE_A_ID)..."
+          aws cloudformation create-stack-instances \
+            --stack-set-name ${{ env.STACKSET_NAME }} \
+            --accounts $SPOKE_A_ID \
+            --regions ${{ env.AWS_REGION }} \
+            --operation-preferences FailureToleranceCount=0,MaxConcurrentCount=1 \
+            --parameter-overrides \
+              ParameterKey=EnvironmentName,ParameterValue=SpokeA \
+              ParameterKey=VpcCIDR,ParameterValue=10.1.0.0/16 \
+              ParameterKey=PublicSubnetCIDR,ParameterValue=10.1.1.0/24 \
+              ParameterKey=PrivateSubnetCIDR,ParameterValue=10.1.2.0/24 \
+              ParameterKey=OtherSpokeCIDRs,ParameterValue=10.2.0.0/16 \
+            || echo "Stack instance may already exist for Spoke A"
+          
+          # Deploy to Spoke B
+          echo "Deploying to Spoke B (Account: $SPOKE_B_ID)..."
+          aws cloudformation create-stack-instances \
+            --stack-set-name ${{ env.STACKSET_NAME }} \
+            --accounts $SPOKE_B_ID \
+            --regions ${{ env.AWS_REGION }} \
+            --operation-preferences FailureToleranceCount=0,MaxConcurrentCount=1 \
+            --parameter-overrides \
+              ParameterKey=EnvironmentName,ParameterValue=SpokeB \
+              ParameterKey=VpcCIDR,ParameterValue=10.2.0.0/16 \
+              ParameterKey=PublicSubnetCIDR,ParameterValue=10.2.1.0/24 \
+              ParameterKey=PrivateSubnetCIDR,ParameterValue=10.2.2.0/24 \
+              ParameterKey=OtherSpokeCIDRs,ParameterValue=10.1.0.0/16 \
+            || echo "Stack instance may already exist for Spoke B"
+      
+      - name: Wait for StackSet Operations to Complete
+        run: |
+          echo "Waiting for StackSet operations to complete..."
+          
+          MAX_WAIT=600  # 10 minutes
+          ELAPSED=0
+          INTERVAL=30
+          
+          while [ $ELAPSED -lt $MAX_WAIT ]; do
+            # Get latest operation ID
+            OPERATION_ID=$(aws cloudformation list-stack-set-operations \
+              --stack-set-name ${{ env.STACKSET_NAME }} \
+              --query 'Summaries[0].OperationId' \
+              --output text)
+            
+            if [ "$OPERATION_ID" == "None" ] || [ -z "$OPERATION_ID" ]; then
+              echo "No operations found"
+              break
+            fi
+            
+            # Check operation status
+            STATUS=$(aws cloudformation describe-stack-set-operation \
+              --stack-set-name ${{ env.STACKSET_NAME }} \
+              --operation-id $OPERATION_ID \
+              --query 'StackSetOperation.Status' \
+              --output text)
+            
+            echo "Operation status: $STATUS"
+            
+            if [ "$STATUS" == "SUCCEEDED" ]; then
+              echo "✅ StackSet operation completed successfully"
+              break
+            elif [ "$STATUS" == "FAILED" ] || [ "$STATUS" == "STOPPED" ]; then
+              echo "❌ StackSet operation failed with status: $STATUS"
+              exit 1
+            fi
+            
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+          
+          if [ $ELAPSED -ge $MAX_WAIT ]; then
+            echo "⚠️ Timeout waiting for StackSet operation"
+            exit 1
+          fi
+      
+      - name: Display Deployment Summary
+        run: |
+          echo "✅ Spoke VPC StackSet Deployment Complete"
+          echo ""
+          echo "StackSet Name: ${{ env.STACKSET_NAME }}"
+          echo "Deployed to accounts:"
+          echo "  - Spoke A: ${{ secrets.SPOKE_A_ACCOUNT_ID }} (10.1.0.0/16)"
+          echo "  - Spoke B: ${{ secrets.SPOKE_B_ACCOUNT_ID }} (10.2.0.0/16)"
