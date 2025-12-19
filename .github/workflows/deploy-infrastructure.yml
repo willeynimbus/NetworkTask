@@ -86,7 +86,7 @@ jobs:
           # Get all resource shares
           RESOURCE_SHARES=$(aws ram get-resource-shares \
             --resource-owner SELF \
-            --query 'resourceShares[?name==`Hub-TGW-Share`].resourceShareArn' \
+            --query 'resourceShares[?name==`Hub-TGW-Account-Share`].resourceShareArn' \
             --output text)
           
           if [ -z "$RESOURCE_SHARES" ]; then

@@ -348,6 +348,24 @@ Resources:
   # Resource Access Manager - Share Transit Gateway with Spoke Accounts
   # ============================================================================
   
+  # Direct account sharing (always created)
+  TransitGatewayAccountShare:
+    Type: AWS::RAM::ResourceShare
+    Properties:
+      Name: !Sub ${EnvironmentName}-TGW-Account-Share
+      AllowExternalPrincipals: true
+      Principals:
+        - !Ref SpokeAAccountId
+        - !Ref SpokeBAccountId
+      ResourceArns:
+        - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:transit-gateway/${TransitGateway}'
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-TGW-Account-Share
+        - Key: Environment
+          Value: !Ref EnvironmentName
+  
+  # Organization sharing (conditional, for future use)
   TransitGatewayResourceShare:
     Condition: UseOrgSharing
     Type: AWS::RAM::ResourceShare
