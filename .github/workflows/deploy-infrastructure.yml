@@ -194,16 +194,19 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
       
-      - name: Deploy Stack Instances to Both Spoke Accounts (Parallel)
+      - name: Deploy Stack Instances to Both Spoke Accounts (Sequential)
         id: deploy
         run: |
           TRANSIT_GATEWAY_ID="${{ needs.deploy-hub.outputs.transit-gateway-id }}"
           SPOKE_A_ID="${{ secrets.SPOKE_A_ACCOUNT_ID }}"
           SPOKE_B_ID="${{ secrets.SPOKE_B_ACCOUNT_ID }}"
           
-          echo "Deploying to both spoke accounts in parallel..."
+          echo "Deploying to both spoke accounts sequentially..."
           echo "Spoke A: $SPOKE_A_ID (10.1.0.0/16)"
           echo "Spoke B: $SPOKE_B_ID (10.2.0.0/16)"
+          echo ""
+          echo "Note: StackSets only allow one operation at a time, so deployments must be sequential."
+          echo ""
           
           # Function to deploy or update a spoke
           deploy_spoke() {
@@ -214,6 +217,7 @@ jobs:
             local PRIVATE_CIDR=$5
             local OTHER_CIDR=$6
             
+            echo "=== Deploying $SPOKE_NAME ==="
             echo "Checking if stack instance exists for $SPOKE_NAME..."
             
             # Check if instance already exists
@@ -239,14 +243,14 @@ jobs:
                   ParameterKey=OtherSpokeCIDRs,ParameterValue=$OTHER_CIDR \
                 --query 'OperationId' \
                 --output text)
-              echo "$SPOKE_NAME updated with operation: $OPERATION_ID"
+              echo "$SPOKE_NAME update started with operation: $OPERATION_ID"
             else
               echo "$SPOKE_NAME instance does not exist. Creating..."
               OPERATION_ID=$(aws cloudformation create-stack-instances \
                 --stack-set-name ${{ env.STACKSET_NAME }} \
                 --accounts $ACCOUNT_ID \
                 --regions ${{ env.AWS_REGION }} \
-                --operation-preferences FailureToleranceCount=0,MaxConcurrentCount=2 \
+                --operation-preferences FailureToleranceCount=0,MaxConcurrentCount=1 \
                 --parameter-overrides \
                   ParameterKey=EnvironmentName,ParameterValue=$SPOKE_NAME \
                   ParameterKey=VpcCIDR,ParameterValue=$VPC_CIDR \
@@ -257,93 +261,61 @@ jobs:
                   ParameterKey=OtherSpokeCIDRs,ParameterValue=$OTHER_CIDR \
                 --query 'OperationId' \
                 --output text)
-              echo "$SPOKE_NAME created with operation: $OPERATION_ID"
+              echo "$SPOKE_NAME creation started with operation: $OPERATION_ID"
             fi
             
-            echo $OPERATION_ID
+            # Wait for this operation to complete before returning
+            echo "Waiting for $SPOKE_NAME deployment to complete..."
+            MAX_WAIT=600
+            ELAPSED=0
+            INTERVAL=15
+            
+            while [ $ELAPSED -lt $MAX_WAIT ]; do
+              STATUS=$(aws cloudformation describe-stack-set-operation \
+                --stack-set-name ${{ env.STACKSET_NAME }} \
+                --operation-id $OPERATION_ID \
+                --query 'StackSetOperation.Status' \
+                --output text 2>/dev/null || echo "UNKNOWN")
+              
+              echo "$SPOKE_NAME operation status: $STATUS"
+              
+              if [ "$STATUS" == "SUCCEEDED" ]; then
+                echo "✅ $SPOKE_NAME deployment completed successfully"
+                return 0
+              elif [ "$STATUS" == "FAILED" ] || [ "$STATUS" == "STOPPED" ]; then
+                echo "❌ $SPOKE_NAME deployment failed"
+                return 1
+              fi
+              
+              sleep $INTERVAL
+              ELAPSED=$((ELAPSED + INTERVAL))
+            done
+            
+            echo "⚠️ Timeout waiting for $SPOKE_NAME deployment"
+            return 1
           }
           
-          # Deploy Spoke A
-          echo "=== Deploying Spoke A ==="
-          OPERATION_A=$(deploy_spoke "$SPOKE_A_ID" "SpokeA" "10.1.0.0/16" "10.1.1.0/24" "10.1.2.0/24" "10.2.0.0/16")
-          echo "Spoke A Operation ID: $OPERATION_A"
-          
-          # Wait before deploying Spoke B
-          sleep 5
-          
-          # Deploy Spoke B
-          echo "=== Deploying Spoke B ==="
-          OPERATION_B=$(deploy_spoke "$SPOKE_B_ID" "SpokeB" "10.2.0.0/16" "10.2.1.0/24" "10.2.2.0/24" "10.1.0.0/16")
-          echo "Spoke B Operation ID: $OPERATION_B"
-          
-          echo "operation_a=$OPERATION_A" >> $GITHUB_OUTPUT
-          echo "operation_b=$OPERATION_B" >> $GITHUB_OUTPUT
-      
-      - name: Wait for Deployments to Complete
-        run: |
-          OPERATION_A="${{ steps.deploy.outputs.operation_a }}"
-          OPERATION_B="${{ steps.deploy.outputs.operation_b }}"
-          
-          echo "Waiting for both deployments to complete..."
-          echo "Operation A: $OPERATION_A"
-          echo "Operation B: $OPERATION_B"
-          
-          MAX_WAIT=600  # 10 minutes
-          ELAPSED=0
-          INTERVAL=20
-          
-          while [ $ELAPSED -lt $MAX_WAIT ]; do
-            ALL_DONE=true
-            
-            # Check Spoke A
-            if [ "$OPERATION_A" != "SKIPPED" ]; then
-              STATUS_A=$(aws cloudformation describe-stack-set-operation \
-                --stack-set-name ${{ env.STACKSET_NAME }} \
-                --operation-id $OPERATION_A \
-                --query 'StackSetOperation.Status' \
-                --output text 2>/dev/null || echo "UNKNOWN")
-              
-              echo "Spoke A status: $STATUS_A"
-              
-              if [ "$STATUS_A" == "RUNNING" ]; then
-                ALL_DONE=false
-              elif [ "$STATUS_A" == "FAILED" ] || [ "$STATUS_A" == "STOPPED" ]; then
-                echo "❌ Spoke A deployment failed"
-                exit 1
-              fi
-            fi
-            
-            # Check Spoke B
-            if [ "$OPERATION_B" != "SKIPPED" ]; then
-              STATUS_B=$(aws cloudformation describe-stack-set-operation \
-                --stack-set-name ${{ env.STACKSET_NAME }} \
-                --operation-id $OPERATION_B \
-                --query 'StackSetOperation.Status' \
-                --output text 2>/dev/null || echo "UNKNOWN")
-              
-              echo "Spoke B status: $STATUS_B"
-              
-              if [ "$STATUS_B" == "RUNNING" ]; then
-                ALL_DONE=false
-              elif [ "$STATUS_B" == "FAILED" ] || [ "$STATUS_B" == "STOPPED" ]; then
-                echo "❌ Spoke B deployment failed"
-                exit 1
-              fi
-            fi
-            
-            if [ "$ALL_DONE" == "true" ]; then
-              echo "✅ All deployments completed successfully"
-              break
-            fi
-            
-            sleep $INTERVAL
-            ELAPSED=$((ELAPSED + INTERVAL))
-          done
-          
-          if [ $ELAPSED -ge $MAX_WAIT ]; then
-            echo "⚠️ Timeout waiting for deployments"
+          # Deploy Spoke A and wait for completion
+          if deploy_spoke "$SPOKE_A_ID" "SpokeA" "10.1.0.0/16" "10.1.1.0/24" "10.1.2.0/24" "10.2.0.0/16"; then
+            echo ""
+            echo "✅ Spoke A deployment complete. Proceeding to Spoke B..."
+            echo ""
+          else
+            echo "❌ Spoke A deployment failed. Aborting."
             exit 1
           fi
+          
+          # Deploy Spoke B and wait for completion
+          if deploy_spoke "$SPOKE_B_ID" "SpokeB" "10.2.0.0/16" "10.2.1.0/24" "10.2.2.0/24" "10.1.0.0/16"; then
+            echo ""
+            echo "✅ Spoke B deployment complete."
+            echo ""
+          else
+            echo "❌ Spoke B deployment failed."
+            exit 1
+          fi
+          
+          echo "deployment_complete=true" >> $GITHUB_OUTPUT
       
       - name: Display Deployment Summary
         run: |
@@ -353,4 +325,4 @@ jobs:
           echo "  - Spoke A: ${{ secrets.SPOKE_A_ACCOUNT_ID }} (10.1.0.0/16)"
           echo "  - Spoke B: ${{ secrets.SPOKE_B_ACCOUNT_ID }} (10.2.0.0/16)"
           echo ""
-          echo "Both spokes deployed in parallel via StackSet!"
+          echo "Both spokes deployed successfully via StackSet!"
