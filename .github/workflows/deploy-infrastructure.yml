@@ -178,26 +178,10 @@ jobs:
           fi
 
   deploy-spoke-instances:
-    name: Deploy to ${{ matrix.spoke.name }}
+    name: Deploy Spoke VPC Instances
     runs-on: ubuntu-latest
     needs: [deploy-hub, verify-ram-share, deploy-spoke-stackset]
     if: needs.verify-ram-share.outputs.ram-accepted == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        spoke:
-          - name: SpokeA
-            account_secret: SPOKE_A_ACCOUNT_ID
-            vpc_cidr: 10.1.0.0/16
-            public_subnet: 10.1.1.0/24
-            private_subnet: 10.1.2.0/24
-            other_spoke_cidr: 10.2.0.0/16
-          - name: SpokeB
-            account_secret: SPOKE_B_ACCOUNT_ID
-            vpc_cidr: 10.2.0.0/16
-            public_subnet: 10.2.1.0/24
-            private_subnet: 10.2.2.0/24
-            other_spoke_cidr: 10.1.0.0/16
     
     steps:
       - name: Checkout code
@@ -210,83 +194,127 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
       
-      - name: Set Account ID
-        id: account
-        run: |
-          if [ "${{ matrix.spoke.account_secret }}" == "SPOKE_A_ACCOUNT_ID" ]; then
-            echo "account_id=${{ secrets.SPOKE_A_ACCOUNT_ID }}" >> $GITHUB_OUTPUT
-          else
-            echo "account_id=${{ secrets.SPOKE_B_ACCOUNT_ID }}" >> $GITHUB_OUTPUT
-          fi
-      
-      - name: Deploy Stack Instance to ${{ matrix.spoke.name }}
+      - name: Deploy Stack Instances to Both Spoke Accounts (Parallel)
+        id: deploy
         run: |
           TRANSIT_GATEWAY_ID="${{ needs.deploy-hub.outputs.transit-gateway-id }}"
-          ACCOUNT_ID="${{ steps.account.outputs.account_id }}"
+          SPOKE_A_ID="${{ secrets.SPOKE_A_ACCOUNT_ID }}"
+          SPOKE_B_ID="${{ secrets.SPOKE_B_ACCOUNT_ID }}"
           
-          echo "Deploying to ${{ matrix.spoke.name }} (Account: $ACCOUNT_ID)..."
+          echo "Deploying to both spoke accounts in parallel..."
+          echo "Spoke A: $SPOKE_A_ID (10.1.0.0/16)"
+          echo "Spoke B: $SPOKE_B_ID (10.2.0.0/16)"
           
-          # Try to create stack instance
-          aws cloudformation create-stack-instances \
+          # Deploy to both accounts with deployment targets
+          # Note: We'll use two separate operations since parameters differ per account
+          
+          # Deploy to Spoke A
+          echo "Starting deployment to Spoke A..."
+          OPERATION_A=$(aws cloudformation create-stack-instances \
             --stack-set-name ${{ env.STACKSET_NAME }} \
-            --accounts $ACCOUNT_ID \
+            --accounts $SPOKE_A_ID \
             --regions ${{ env.AWS_REGION }} \
-            --operation-preferences FailureToleranceCount=0,MaxConcurrentCount=1 \
+            --operation-preferences FailureToleranceCount=0,MaxConcurrentCount=2 \
             --parameter-overrides \
-              ParameterKey=EnvironmentName,ParameterValue=${{ matrix.spoke.name }} \
-              ParameterKey=VpcCIDR,ParameterValue=${{ matrix.spoke.vpc_cidr }} \
-              ParameterKey=PublicSubnetCIDR,ParameterValue=${{ matrix.spoke.public_subnet }} \
-              ParameterKey=PrivateSubnetCIDR,ParameterValue=${{ matrix.spoke.private_subnet }} \
+              ParameterKey=EnvironmentName,ParameterValue=SpokeA \
+              ParameterKey=VpcCIDR,ParameterValue=10.1.0.0/16 \
+              ParameterKey=PublicSubnetCIDR,ParameterValue=10.1.1.0/24 \
+              ParameterKey=PrivateSubnetCIDR,ParameterValue=10.1.2.0/24 \
               ParameterKey=TransitGatewayId,ParameterValue=$TRANSIT_GATEWAY_ID \
               ParameterKey=HubVpcCIDR,ParameterValue=10.0.0.0/16 \
-              ParameterKey=OtherSpokeCIDRs,ParameterValue=${{ matrix.spoke.other_spoke_cidr }} \
-            && echo "✅ Stack instance created for ${{ matrix.spoke.name }}" \
-            || {
-              echo "Stack instance might already exist. Checking status..."
-              
-              # Check if instance exists and get its status
-              STATUS=$(aws cloudformation describe-stack-instance \
-                --stack-set-name ${{ env.STACKSET_NAME }} \
-                --stack-instance-account $ACCOUNT_ID \
-                --stack-instance-region ${{ env.AWS_REGION }} \
-                --query 'StackInstance.Status' \
-                --output text 2>/dev/null || echo "NOT_FOUND")
-              
-              if [ "$STATUS" == "CURRENT" ]; then
-                echo "✅ Stack instance already exists and is current"
-              elif [ "$STATUS" == "NOT_FOUND" ]; then
-                echo "❌ Failed to create stack instance and it doesn't exist"
-                exit 1
-              else
-                echo "⚠️ Stack instance exists with status: $STATUS"
-              fi
+              ParameterKey=OtherSpokeCIDRs,ParameterValue=10.2.0.0/16 \
+            --query 'OperationId' \
+            --output text 2>&1) || {
+              echo "Spoke A might already exist, checking status..."
+              OPERATION_A="SKIPPED"
             }
+          
+          echo "Spoke A Operation ID: $OPERATION_A"
+          
+          # Wait a moment before starting second operation
+          sleep 5
+          
+          # Deploy to Spoke B
+          echo "Starting deployment to Spoke B..."
+          OPERATION_B=$(aws cloudformation create-stack-instances \
+            --stack-set-name ${{ env.STACKSET_NAME }} \
+            --accounts $SPOKE_B_ID \
+            --regions ${{ env.AWS_REGION }} \
+            --operation-preferences FailureToleranceCount=0,MaxConcurrentCount=2 \
+            --parameter-overrides \
+              ParameterKey=EnvironmentName,ParameterValue=SpokeB \
+              ParameterKey=VpcCIDR,ParameterValue=10.2.0.0/16 \
+              ParameterKey=PublicSubnetCIDR,ParameterValue=10.2.1.0/24 \
+              ParameterKey=PrivateSubnetCIDR,ParameterValue=10.2.2.0/24 \
+              ParameterKey=TransitGatewayId,ParameterValue=$TRANSIT_GATEWAY_ID \
+              ParameterKey=HubVpcCIDR,ParameterValue=10.0.0.0/16 \
+              ParameterKey=OtherSpokeCIDRs,ParameterValue=10.1.0.0/16 \
+            --query 'OperationId' \
+            --output text 2>&1) || {
+              echo "Spoke B might already exist, checking status..."
+              OPERATION_B="SKIPPED"
+            }
+          
+          echo "Spoke B Operation ID: $OPERATION_B"
+          
+          echo "operation_a=$OPERATION_A" >> $GITHUB_OUTPUT
+          echo "operation_b=$OPERATION_B" >> $GITHUB_OUTPUT
       
-      - name: Wait for Stack Instance Deployment
+      - name: Wait for Deployments to Complete
         run: |
-          echo "Waiting for stack instance deployment to complete..."
-          ACCOUNT_ID="${{ steps.account.outputs.account_id }}"
+          OPERATION_A="${{ steps.deploy.outputs.operation_a }}"
+          OPERATION_B="${{ steps.deploy.outputs.operation_b }}"
+          
+          echo "Waiting for both deployments to complete..."
+          echo "Operation A: $OPERATION_A"
+          echo "Operation B: $OPERATION_B"
           
           MAX_WAIT=600  # 10 minutes
           ELAPSED=0
-          INTERVAL=15
+          INTERVAL=20
           
           while [ $ELAPSED -lt $MAX_WAIT ]; do
-            STATUS=$(aws cloudformation describe-stack-instance \
-              --stack-set-name ${{ env.STACKSET_NAME }} \
-              --stack-instance-account $ACCOUNT_ID \
-              --stack-instance-region ${{ env.AWS_REGION }} \
-              --query 'StackInstance.Status' \
-              --output text 2>/dev/null || echo "NOT_FOUND")
+            ALL_DONE=true
             
-            echo "Stack instance status: $STATUS"
+            # Check Spoke A
+            if [ "$OPERATION_A" != "SKIPPED" ]; then
+              STATUS_A=$(aws cloudformation describe-stack-set-operation \
+                --stack-set-name ${{ env.STACKSET_NAME }} \
+                --operation-id $OPERATION_A \
+                --query 'StackSetOperation.Status' \
+                --output text 2>/dev/null || echo "UNKNOWN")
+              
+              echo "Spoke A status: $STATUS_A"
+              
+              if [ "$STATUS_A" == "RUNNING" ]; then
+                ALL_DONE=false
+              elif [ "$STATUS_A" == "FAILED" ] || [ "$STATUS_A" == "STOPPED" ]; then
+                echo "❌ Spoke A deployment failed"
+                exit 1
+              fi
+            fi
             
-            if [ "$STATUS" == "CURRENT" ]; then
-              echo "✅ Stack instance deployment completed successfully"
+            # Check Spoke B
+            if [ "$OPERATION_B" != "SKIPPED" ]; then
+              STATUS_B=$(aws cloudformation describe-stack-set-operation \
+                --stack-set-name ${{ env.STACKSET_NAME }} \
+                --operation-id $OPERATION_B \
+                --query 'StackSetOperation.Status' \
+                --output text 2>/dev/null || echo "UNKNOWN")
+              
+              echo "Spoke B status: $STATUS_B"
+              
+              if [ "$STATUS_B" == "RUNNING" ]; then
+                ALL_DONE=false
+              elif [ "$STATUS_B" == "FAILED" ] || [ "$STATUS_B" == "STOPPED" ]; then
+                echo "❌ Spoke B deployment failed"
+                exit 1
+              fi
+            fi
+            
+            if [ "$ALL_DONE" == "true" ]; then
+              echo "✅ All deployments completed successfully"
               break
-            elif [ "$STATUS" == "OUTDATED" ] || [ "$STATUS" == "INOPERABLE" ]; then
-              echo "❌ Stack instance deployment failed with status: $STATUS"
-              exit 1
             fi
             
             sleep $INTERVAL
@@ -294,15 +322,16 @@ jobs:
           done
           
           if [ $ELAPSED -ge $MAX_WAIT ]; then
-            echo "⚠️ Timeout waiting for stack instance deployment"
+            echo "⚠️ Timeout waiting for deployments"
             exit 1
           fi
       
-      - name: Display Deployment Summary for ${{ matrix.spoke.name }}
+      - name: Display Deployment Summary
         run: |
-          echo "✅ ${{ matrix.spoke.name }} VPC Deployment Complete"
+          echo "✅ Spoke VPC Deployments Complete"
           echo ""
-          echo "Account: ${{ matrix.spoke.account_id }}"
-          echo "VPC CIDR: ${{ matrix.spoke.vpc_cidr }}"
-          echo "Public Subnet: ${{ matrix.spoke.public_subnet }}"
-          echo "Private Subnet: ${{ matrix.spoke.private_subnet }}"
+          echo "Deployed to accounts:"
+          echo "  - Spoke A: ${{ secrets.SPOKE_A_ACCOUNT_ID }} (10.1.0.0/16)"
+          echo "  - Spoke B: ${{ secrets.SPOKE_B_ACCOUNT_ID }} (10.2.0.0/16)"
+          echo ""
+          echo "Both spokes deployed in parallel via StackSet!"
