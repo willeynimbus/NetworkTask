@@ -33,7 +33,10 @@ jobs:
             --template-file cloudformation/hub/hub-infrastructure.yaml \
             --stack-name ${{ env.HUB_STACK_NAME }} \
             --capabilities CAPABILITY_IAM \
-            --no-fail-on-empty-changeset
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              SpokeAAccountId=${{ secrets.SPOKE_A_ACCOUNT_ID }} \
+              SpokeBAccountId=${{ secrets.SPOKE_B_ACCOUNT_ID }}
       
       - name: Get Hub Stack Outputs
         id: hub-outputs
