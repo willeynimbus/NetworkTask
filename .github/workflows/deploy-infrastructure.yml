@@ -194,124 +194,98 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
       
-      - name: Deploy Stack Instances to Both Spoke Accounts (Sequential)
+      - name: Deploy Stack Instances to Both Spoke Accounts (Parallel)
         id: deploy
         run: |
           TRANSIT_GATEWAY_ID="${{ needs.deploy-hub.outputs.transit-gateway-id }}"
           SPOKE_A_ID="${{ secrets.SPOKE_A_ACCOUNT_ID }}"
           SPOKE_B_ID="${{ secrets.SPOKE_B_ACCOUNT_ID }}"
           
-          echo "Deploying to both spoke accounts sequentially..."
-          echo "Spoke A: $SPOKE_A_ID (10.1.0.0/16)"
-          echo "Spoke B: $SPOKE_B_ID (10.2.0.0/16)"
+          echo "Deploying to both spoke accounts in parallel..."
+          echo "Spoke A: $SPOKE_A_ID"
+          echo "Spoke B: $SPOKE_B_ID"
           echo ""
-          echo "Note: StackSets only allow one operation at a time, so deployments must be sequential."
+          echo "Note: CIDR values are configured via mappings in the template"
+          echo "  - Spoke A: 10.1.0.0/16"
+          echo "  - Spoke B: 10.2.0.0/16"
           echo ""
           
-          # Function to deploy or update a spoke
-          deploy_spoke() {
-            local ACCOUNT_ID=$1
-            local SPOKE_NAME=$2
-            local VPC_CIDR=$3
-            local PUBLIC_CIDR=$4
-            local PRIVATE_CIDR=$5
-            local OTHER_CIDR=$6
-            
-            echo "=== Deploying $SPOKE_NAME ==="
-            echo "Checking if stack instance exists for $SPOKE_NAME..."
-            
-            # Check if instance already exists
-            if aws cloudformation describe-stack-instance \
+          # Check if instances already exist
+          EXISTING_INSTANCES=$(aws cloudformation list-stack-instances \
+            --stack-set-name ${{ env.STACKSET_NAME }} \
+            --query 'Summaries[].Account' \
+            --output text 2>/dev/null || echo "")
+          
+          if echo "$EXISTING_INSTANCES" | grep -q "$SPOKE_A_ID\|$SPOKE_B_ID"; then
+            echo "Stack instances exist. Updating..."
+            OPERATION_ID=$(aws cloudformation update-stack-instances \
               --stack-set-name ${{ env.STACKSET_NAME }} \
-              --stack-instance-account $ACCOUNT_ID \
-              --stack-instance-region ${{ env.AWS_REGION }} \
-              --query 'StackInstance.StackId' \
-              --output text 2>/dev/null; then
-              
-              echo "$SPOKE_NAME instance exists. Updating..."
-              OPERATION_ID=$(aws cloudformation update-stack-instances \
-                --stack-set-name ${{ env.STACKSET_NAME }} \
-                --accounts $ACCOUNT_ID \
-                --regions ${{ env.AWS_REGION }} \
-                --parameter-overrides \
-                  ParameterKey=EnvironmentName,ParameterValue=$SPOKE_NAME \
-                  ParameterKey=VpcCIDR,ParameterValue=$VPC_CIDR \
-                  ParameterKey=PublicSubnetCIDR,ParameterValue=$PUBLIC_CIDR \
-                  ParameterKey=PrivateSubnetCIDR,ParameterValue=$PRIVATE_CIDR \
-                  ParameterKey=TransitGatewayId,ParameterValue=$TRANSIT_GATEWAY_ID \
-                  ParameterKey=HubVpcCIDR,ParameterValue=10.0.0.0/16 \
-                  ParameterKey=OtherSpokeCIDRs,ParameterValue=$OTHER_CIDR \
-                --query 'OperationId' \
-                --output text)
-              echo "$SPOKE_NAME update started with operation: $OPERATION_ID"
-            else
-              echo "$SPOKE_NAME instance does not exist. Creating..."
-              OPERATION_ID=$(aws cloudformation create-stack-instances \
-                --stack-set-name ${{ env.STACKSET_NAME }} \
-                --accounts $ACCOUNT_ID \
-                --regions ${{ env.AWS_REGION }} \
-                --operation-preferences FailureToleranceCount=0,MaxConcurrentCount=1 \
-                --parameter-overrides \
-                  ParameterKey=EnvironmentName,ParameterValue=$SPOKE_NAME \
-                  ParameterKey=VpcCIDR,ParameterValue=$VPC_CIDR \
-                  ParameterKey=PublicSubnetCIDR,ParameterValue=$PUBLIC_CIDR \
-                  ParameterKey=PrivateSubnetCIDR,ParameterValue=$PRIVATE_CIDR \
-                  ParameterKey=TransitGatewayId,ParameterValue=$TRANSIT_GATEWAY_ID \
-                  ParameterKey=HubVpcCIDR,ParameterValue=10.0.0.0/16 \
-                  ParameterKey=OtherSpokeCIDRs,ParameterValue=$OTHER_CIDR \
-                --query 'OperationId' \
-                --output text)
-              echo "$SPOKE_NAME creation started with operation: $OPERATION_ID"
-            fi
-            
-            # Wait for this operation to complete before returning
-            echo "Waiting for $SPOKE_NAME deployment to complete..."
-            MAX_WAIT=600
-            ELAPSED=0
-            INTERVAL=15
-            
-            while [ $ELAPSED -lt $MAX_WAIT ]; do
-              STATUS=$(aws cloudformation describe-stack-set-operation \
-                --stack-set-name ${{ env.STACKSET_NAME }} \
-                --operation-id $OPERATION_ID \
-                --query 'StackSetOperation.Status' \
-                --output text 2>/dev/null || echo "UNKNOWN")
-              
-              echo "$SPOKE_NAME operation status: $STATUS"
-              
-              if [ "$STATUS" == "SUCCEEDED" ]; then
-                echo "✅ $SPOKE_NAME deployment completed successfully"
-                return 0
-              elif [ "$STATUS" == "FAILED" ] || [ "$STATUS" == "STOPPED" ]; then
-                echo "❌ $SPOKE_NAME deployment failed"
-                return 1
-              fi
-              
-              sleep $INTERVAL
-              ELAPSED=$((ELAPSED + INTERVAL))
-            done
-            
-            echo "⚠️ Timeout waiting for $SPOKE_NAME deployment"
-            return 1
-          }
-          
-          # Deploy Spoke A and wait for completion
-          if deploy_spoke "$SPOKE_A_ID" "SpokeA" "10.1.0.0/16" "10.1.1.0/24" "10.1.2.0/24" "10.2.0.0/16"; then
-            echo ""
-            echo "✅ Spoke A deployment complete. Proceeding to Spoke B..."
-            echo ""
+              --accounts $SPOKE_A_ID $SPOKE_B_ID \
+              --regions ${{ env.AWS_REGION }} \
+              --operation-preferences FailureToleranceCount=0,MaxConcurrentCount=2 \
+              --parameter-overrides \
+                ParameterKey=TransitGatewayId,ParameterValue=$TRANSIT_GATEWAY_ID \
+                ParameterKey=HubVpcCIDR,ParameterValue=10.0.0.0/16 \
+              --query 'OperationId' \
+              --output text)
+            echo "Update operation started: $OPERATION_ID"
           else
-            echo "❌ Spoke A deployment failed. Aborting."
-            exit 1
+            echo "Creating new stack instances..."
+            OPERATION_ID=$(aws cloudformation create-stack-instances \
+              --stack-set-name ${{ env.STACKSET_NAME }} \
+              --accounts $SPOKE_A_ID $SPOKE_B_ID \
+              --regions ${{ env.AWS_REGION }} \
+              --operation-preferences FailureToleranceCount=0,MaxConcurrentCount=2 \
+              --parameter-overrides \
+                ParameterKey=TransitGatewayId,ParameterValue=$TRANSIT_GATEWAY_ID \
+                ParameterKey=HubVpcCIDR,ParameterValue=10.0.0.0/16 \
+              --query 'OperationId' \
+              --output text)
+            echo "Create operation started: $OPERATION_ID"
           fi
           
-          # Deploy Spoke B and wait for completion
-          if deploy_spoke "$SPOKE_B_ID" "SpokeB" "10.2.0.0/16" "10.2.1.0/24" "10.2.2.0/24" "10.1.0.0/16"; then
+          # Wait for parallel deployment to complete
+          echo ""
+          echo "Waiting for parallel deployment to complete..."
+          MAX_WAIT=600
+          ELAPSED=0
+          INTERVAL=15
+          
+          while [ $ELAPSED -lt $MAX_WAIT ]; do
+            STATUS=$(aws cloudformation describe-stack-set-operation \
+              --stack-set-name ${{ env.STACKSET_NAME }} \
+              --operation-id $OPERATION_ID \
+              --query 'StackSetOperation.Status' \
+              --output text 2>/dev/null || echo "UNKNOWN")
+            
+            echo "Operation status: $STATUS (elapsed: ${ELAPSED}s)"
+            
+            if [ "$STATUS" == "SUCCEEDED" ]; then
+              echo ""
+              echo "✅ Parallel deployment completed successfully"
+              break
+            elif [ "$STATUS" == "FAILED" ] || [ "$STATUS" == "STOPPED" ]; then
+              echo ""
+              echo "❌ Deployment failed"
+              
+              # Show detailed error information
+              echo "Fetching error details..."
+              aws cloudformation describe-stack-set-operation \
+                --stack-set-name ${{ env.STACKSET_NAME }} \
+                --operation-id $OPERATION_ID \
+                --query 'StackSetOperation.{Status:Status,StatusReason:StatusReason}' \
+                --output table
+              
+              exit 1
+            fi
+            
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+          
+          if [ $ELAPSED -ge $MAX_WAIT ]; then
             echo ""
-            echo "✅ Spoke B deployment complete."
-            echo ""
-          else
-            echo "❌ Spoke B deployment failed."
+            echo "⚠️ Timeout waiting for deployment"
             exit 1
           fi
           
@@ -325,4 +299,5 @@ jobs:
           echo "  - Spoke A: ${{ secrets.SPOKE_A_ACCOUNT_ID }} (10.1.0.0/16)"
           echo "  - Spoke B: ${{ secrets.SPOKE_B_ACCOUNT_ID }} (10.2.0.0/16)"
           echo ""
-          echo "Both spokes deployed successfully via StackSet!"
+          echo "Both spokes deployed in parallel via StackSet!"
+          echo "CIDR configurations applied automatically via CloudFormation mappings."

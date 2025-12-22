@@ -1,28 +1,23 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Unified Spoke VPC Infrastructure - Supports multiple spoke deployments with different parameters'
+Description: 'Unified Spoke VPC Infrastructure - Uses mappings for account-specific configurations'
+
+Mappings:
+  AccountConfig:
+    "417371242369":  # Spoke A Account ID
+      EnvironmentName: "SpokeA"
+      VpcCIDR: "10.1.0.0/16"
+      PublicSubnetCIDR: "10.1.1.0/24"
+      PrivateSubnetCIDR: "10.1.2.0/24"
+      OtherSpokeCIDR: "10.2.0.0/16"
+      
+    "414329322210":  # Spoke B Account ID
+      EnvironmentName: "SpokeB"
+      VpcCIDR: "10.2.0.0/16"
+      PublicSubnetCIDR: "10.2.1.0/24"
+      PrivateSubnetCIDR: "10.2.2.0/24"
+      OtherSpokeCIDR: "10.1.0.0/16"
 
 Parameters:
-  EnvironmentName:
-    Description: Environment name prefix for resources (e.g., SpokeA, SpokeB, SpokeC)
-    Type: String
-    Default: Spoke
-  
-  VpcCIDR:
-    Description: CIDR block for Spoke VPC
-    Type: String
-    Default: 10.1.0.0/16
-    AllowedPattern: ^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\/([0-9]|[1-2][0-9]|3[0-2]))$
-  
-  PublicSubnetCIDR:
-    Description: CIDR block for public subnet
-    Type: String
-    Default: 10.1.1.0/24
-  
-  PrivateSubnetCIDR:
-    Description: CIDR block for private subnet
-    Type: String
-    Default: 10.1.2.0/24
-
   TransitGatewayId:
     Description: Transit Gateway ID from Hub Account (shared via RAM)
     Type: String
@@ -33,14 +28,6 @@ Parameters:
     Type: String
     Default: 10.0.0.0/16
 
-  OtherSpokeCIDRs:
-    Description: Comma-separated list of other Spoke VPC CIDRs (e.g., 10.1.0.0/16,10.2.0.0/16)
-    Type: CommaDelimitedList
-    Default: ""
-
-Conditions:
-  HasOtherSpokes: !Not [!Equals [!Join ['', !Ref OtherSpokeCIDRs], '']]
-
 Resources:
   # ============================================================================
   # VPC Resources
@@ -49,14 +36,16 @@ Resources:
   VPC:
     Type: AWS::EC2::VPC
     Properties:
-      CidrBlock: !Ref VpcCIDR
+      CidrBlock: !FindInMap [AccountConfig, !Ref "AWS::AccountId", VpcCIDR]
       EnableDnsHostnames: true
       EnableDnsSupport: true
       Tags:
         - Key: Name
-          Value: !Sub ${EnvironmentName}-VPC
+          Value: !Sub 
+            - "${EnvName}-VPC"
+            - EnvName: !FindInMap [AccountConfig, !Ref "AWS::AccountId", EnvironmentName]
         - Key: Environment
-          Value: !Ref EnvironmentName
+          Value: !FindInMap [AccountConfig, !Ref "AWS::AccountId", EnvironmentName]
 
   # Internet Gateway
   InternetGateway:
@@ -64,7 +53,9 @@ Resources:
     Properties:
       Tags:
         - Key: Name
-          Value: !Sub ${EnvironmentName}-IGW
+          Value: !Sub 
+            - "${EnvName}-IGW"
+            - EnvName: !FindInMap [AccountConfig, !Ref "AWS::AccountId", EnvironmentName]
 
   InternetGatewayAttachment:
     Type: AWS::EC2::VPCGatewayAttachment
@@ -78,11 +69,13 @@ Resources:
     Properties:
       VpcId: !Ref VPC
       AvailabilityZone: !Select [0, !GetAZs '']
-      CidrBlock: !Ref PublicSubnetCIDR
+      CidrBlock: !FindInMap [AccountConfig, !Ref "AWS::AccountId", PublicSubnetCIDR]
       MapPublicIpOnLaunch: true
       Tags:
         - Key: Name
-          Value: !Sub ${EnvironmentName}-Public-Subnet
+          Value: !Sub 
+            - "${EnvName}-Public-Subnet"
+            - EnvName: !FindInMap [AccountConfig, !Ref "AWS::AccountId", EnvironmentName]
         - Key: Type
           Value: Public
 
@@ -92,11 +85,13 @@ Resources:
     Properties:
       VpcId: !Ref VPC
       AvailabilityZone: !Select [0, !GetAZs '']
-      CidrBlock: !Ref PrivateSubnetCIDR
+      CidrBlock: !FindInMap [AccountConfig, !Ref "AWS::AccountId", PrivateSubnetCIDR]
       MapPublicIpOnLaunch: false
       Tags:
         - Key: Name
-          Value: !Sub ${EnvironmentName}-Private-Subnet
+          Value: !Sub 
+            - "${EnvName}-Private-Subnet"
+            - EnvName: !FindInMap [AccountConfig, !Ref "AWS::AccountId", EnvironmentName]
         - Key: Type
           Value: Private
 
@@ -107,7 +102,9 @@ Resources:
       VpcId: !Ref VPC
       Tags:
         - Key: Name
-          Value: !Sub ${EnvironmentName}-Public-Routes
+          Value: !Sub 
+            - "${EnvName}-Public-Routes"
+            - EnvName: !FindInMap [AccountConfig, !Ref "AWS::AccountId", EnvironmentName]
 
   DefaultPublicRoute:
     Type: AWS::EC2::Route
@@ -130,7 +127,9 @@ Resources:
       VpcId: !Ref VPC
       Tags:
         - Key: Name
-          Value: !Sub ${EnvironmentName}-Private-Routes
+          Value: !Sub 
+            - "${EnvName}-Private-Routes"
+            - EnvName: !FindInMap [AccountConfig, !Ref "AWS::AccountId", EnvironmentName]
 
   PrivateSubnetRouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
@@ -151,7 +150,9 @@ Resources:
         - !Ref PrivateSubnet
       Tags:
         - Key: Name
-          Value: !Sub ${EnvironmentName}-VPC-TGW-Attachment
+          Value: !Sub 
+            - "${EnvName}-VPC-TGW-Attachment"
+            - EnvName: !FindInMap [AccountConfig, !Ref "AWS::AccountId", EnvironmentName]
 
   # Route to Hub VPC via Transit Gateway
   RouteToHub:
@@ -162,24 +163,22 @@ Resources:
       DestinationCidrBlock: !Ref HubVpcCIDR
       TransitGatewayId: !Ref TransitGatewayId
 
-  # Routes to Other Spoke VPCs via Transit Gateway (conditional on HasOtherSpokes)
+  # Routes to Other Spoke VPCs via Transit Gateway
   RouteToOtherSpokesPrivate:
     Type: AWS::EC2::Route
-    Condition: HasOtherSpokes
     DependsOn: TransitGatewayAttachment
     Properties:
       RouteTableId: !Ref PrivateRouteTable
-      DestinationCidrBlock: !Select [0, !Ref OtherSpokeCIDRs]
+      DestinationCidrBlock: !FindInMap [AccountConfig, !Ref "AWS::AccountId", OtherSpokeCIDR]
       TransitGatewayId: !Ref TransitGatewayId
 
   # Also add route in public route table to allow public subnet instances to reach other spokes via TGW
   RouteToOtherSpokesPublic:
     Type: AWS::EC2::Route
-    Condition: HasOtherSpokes
     DependsOn: TransitGatewayAttachment
     Properties:
       RouteTableId: !Ref PublicRouteTable
-      DestinationCidrBlock: !Select [0, !Ref OtherSpokeCIDRs]
+      DestinationCidrBlock: !FindInMap [AccountConfig, !Ref "AWS::AccountId", OtherSpokeCIDR]
       TransitGatewayId: !Ref TransitGatewayId
 
 Outputs:
@@ -191,30 +190,40 @@ Outputs:
 
   VpcCIDR:
     Description: Spoke VPC CIDR
-    Value: !Ref VpcCIDR
+    Value: !FindInMap [AccountConfig, !Ref "AWS::AccountId", VpcCIDR]
     Export:
-      Name: !Sub ${EnvironmentName}-VPC-CIDR
+      Name: !Sub 
+        - "${EnvName}-VPC-CIDR"
+        - EnvName: !FindInMap [AccountConfig, !Ref "AWS::AccountId", EnvironmentName]
 
   PublicSubnet:
     Description: Public Subnet
     Value: !Ref PublicSubnet
     Export:
-      Name: !Sub ${EnvironmentName}-PublicSubnet-ID
+      Name: !Sub 
+        - "${EnvName}-PublicSubnet-ID"
+        - EnvName: !FindInMap [AccountConfig, !Ref "AWS::AccountId", EnvironmentName]
 
   PrivateSubnet:
     Description: Private Subnet
     Value: !Ref PrivateSubnet
     Export:
-      Name: !Sub ${EnvironmentName}-PrivateSubnet-ID
+      Name: !Sub 
+        - "${EnvName}-PrivateSubnet-ID"
+        - EnvName: !FindInMap [AccountConfig, !Ref "AWS::AccountId", EnvironmentName]
 
   TransitGatewayAttachmentId:
     Description: Transit Gateway Attachment ID
     Value: !Ref TransitGatewayAttachment
     Export:
-      Name: !Sub ${EnvironmentName}-TGW-Attachment-ID
+      Name: !Sub 
+        - "${EnvName}-TGW-Attachment-ID"
+        - EnvName: !FindInMap [AccountConfig, !Ref "AWS::AccountId", EnvironmentName]
 
   PrivateRouteTable:
     Description: Private Route Table ID
     Value: !Ref PrivateRouteTable
     Export:
-      Name: !Sub ${EnvironmentName}-PrivateRouteTable-ID
+      Name: !Sub 
+        - "${EnvName}-PrivateRouteTable-ID"
+        - EnvName: !FindInMap [AccountConfig, !Ref "AWS::AccountId", EnvironmentName]
