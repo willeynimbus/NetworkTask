@@ -185,45 +185,23 @@ Outputs:
   VPC:
     Description: Spoke VPC ID
     Value: !Ref VPC
-    Export:
-      Name: !Sub ${EnvironmentName}-VPC-ID
 
   VpcCIDR:
     Description: Spoke VPC CIDR
     Value: !FindInMap [AccountConfig, !Ref "AWS::AccountId", VpcCIDR]
-    Export:
-      Name: !Sub 
-        - "${EnvName}-VPC-CIDR"
-        - EnvName: !FindInMap [AccountConfig, !Ref "AWS::AccountId", EnvironmentName]
 
   PublicSubnet:
     Description: Public Subnet
     Value: !Ref PublicSubnet
-    Export:
-      Name: !Sub 
-        - "${EnvName}-PublicSubnet-ID"
-        - EnvName: !FindInMap [AccountConfig, !Ref "AWS::AccountId", EnvironmentName]
 
   PrivateSubnet:
     Description: Private Subnet
     Value: !Ref PrivateSubnet
-    Export:
-      Name: !Sub 
-        - "${EnvName}-PrivateSubnet-ID"
-        - EnvName: !FindInMap [AccountConfig, !Ref "AWS::AccountId", EnvironmentName]
 
   TransitGatewayAttachmentId:
     Description: Transit Gateway Attachment ID
     Value: !Ref TransitGatewayAttachment
-    Export:
-      Name: !Sub 
-        - "${EnvName}-TGW-Attachment-ID"
-        - EnvName: !FindInMap [AccountConfig, !Ref "AWS::AccountId", EnvironmentName]
 
   PrivateRouteTable:
     Description: Private Route Table ID
     Value: !Ref PrivateRouteTable
-    Export:
-      Name: !Sub 
-        - "${EnvName}-PrivateRouteTable-ID"
-        - EnvName: !FindInMap [AccountConfig, !Ref "AWS::AccountId", EnvironmentName]
